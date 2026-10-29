@@ -14,7 +14,7 @@ gaea plugins add https://github.com/xocialize-code/gaea-plugin-flux2-klein
 | Model | MES operation | Quality tiers | Notes |
 |---|---|---|---|
 | `klein-4b` | `image.generate` | draft, standard | Distilled to 4 steps without CFG. A negative prompt does nothing and is reported `negative_prompt_ignored`. |
-| `klein-4b` | `image.edit` (Gaea's default) | draft, standard | Multi-reference editing: 1–4 images, named in the instruction in order ("the fox from image 1 in the cabin from image 2"). Drawn from noise at the first image's size, so `strength` does nothing (`param_ignored`). |
+| `klein-4b` | `image.edit` (Gaea's default) | draft, standard | Multi-reference editing: 1–4 images, named in the instruction in order ("the fox from image 1 in the cabin from image 2"). Drawn from noise at 1024² unless a size is asked (as pixel-agency-image-engine v0.9.1 draws it), and returned at the first image's size; `strength` does nothing (`param_ignored`). |
 | `klein-4b-base` | `image.generate`, `image.edit` | best | The undistilled checkpoint: 28 steps with two-pass CFG at guidance 4, and negative prompts on generate. About 12× the distilled model's time. |
 
 - **Sizes.** 256–2048 px a side, at most 1024² in area (the area Klein's footprints were measured at), in multiples
@@ -28,8 +28,7 @@ gaea plugins add https://github.com/xocialize-code/gaea-plugin-flux2-klein
   (`Sources/KleinPlugin/Resources/flux2-klein-4b.json`, verbatim from mlx-image-runtime 0.15.0 = flux2-klein-swift
   `registry/flux2-klein-4b.json` @74d4b23): ids `flux2-klein:<id>`, the same pinned revisions and sha256s, all
   Apache-2.0 and verified. `refcontrol-pose` (pose, reference) and `tryon` (person, top, bottom) are ic: their images
-  arrive with the adapter and lead the edit's references in slot order, so such an edit may have no images of its own
-  (the first slot's image then sets the size). The worker fetches each adapter into the models root (`adapters/<sha256>/`)
+  arrive with the adapter and lead the edit's references in slot order, so such an edit may have no images of its own. The worker fetches each adapter into the models root (`adapters/<sha256>/`)
   on first use; Gaea applies triggers and prompt templates before the run. Requires Gaea 0.7.0.
 - **Not yet offered:** the package's encoder-evict light tier for 16 GB Macs.
 

@@ -153,9 +153,9 @@ func generate(_ tier: Tier) -> EngineOperation {
 }
 
 /// MES image.edit: Klein's multi-reference editing. Up to four images condition a new image drawn toward the
-/// instruction ("the subject from image 1, on a beach"); the first image sets the size (Image profile §3). One output.
-/// An ic adapter's images (refcontrol-pose's skeleton and subject) lead the references in slot order, so with one the
-/// edit may have no images of its own; its first slot's image then sets the size.
+/// instruction ("the subject from image 1, on a beach"), at the size asked, else at the package's 1024²; the host brings
+/// it back to the first image's size (Image profile §3). One output. An ic adapter's images (refcontrol-pose's skeleton
+/// and subject) lead the references in slot order, so with one the edit may have no images of its own.
 func edit(_ tier: Tier) -> EngineOperation {
     EngineOperation("image.edit", outputNames: ["image": "image"]) { job in
         guard let instruction = try job.text("instruction"), !instruction.isEmpty else {
@@ -178,7 +178,11 @@ func edit(_ tier: Tier) -> EngineOperation {
               let inputHeight = properties[kCGImagePropertyPixelHeight] as? Int else {
             throw GPPError(.invalidRequest, "image.edit needs readable PNG or JPEG images.")
         }
-        let size = try snapped(try requestedSize(job, fallback: (inputWidth, inputHeight)))
+        _ = (inputWidth, inputHeight)
+        // Without a size the package chooses (1024², whatever the inputs' aspect), as on pixel-agency-image-engine
+        // v0.9.1, which sends none; the normalizer brings the result back to the first image's size (AB-T-0383).
+        let asked = job.param("size") != nil || job.param("aspect") != nil
+        let size = try snapped(try requestedSize(job, fallback: (1024, 1024)))
         var shared = try Shared(job, tier: tier, counted: false)
         if let warning = size.warning { shared.warnings.insert(warning, at: 0) }
         if job.param("strength") != nil {
@@ -188,7 +192,7 @@ func edit(_ tier: Tier) -> EngineOperation {
         }
         let images = try references.indices.map { try job.image("images", index: $0) }
         return [EngineCall(IEditRequest(images: images, prompt: instruction, negativePrompt: shared.negative,
-                                        width: size.width, height: size.height, steps: shared.steps,
+                                        width: asked ? size.width : nil, height: asked ? size.height : nil, steps: shared.steps,
                                         guidanceScale: shared.guidance, seed: shared.seed, adapters: try job.adapterRefs()),
                            effective: shared.effective(width: size.width, height: size.height, counted: false),
                            warnings: shared.warnings)]
@@ -239,7 +243,7 @@ func offerModel(_ tier: Tier, edit: Bool) -> JSONValue {
     case (.distilled, true):
         model["default"] = true
         model["notes"] = .string("Multi-reference editing: up to 4 images, named in the instruction in order (\"the subject from image 1, on a beach\"). "
-            + "Drawn from noise at the first image's size; strength does nothing.")
+            + "Drawn from noise at 1024² unless a size is asked, and returned at the first image's size; strength does nothing.")
     case (.base, true):
         model["notes"] = "Multi-reference editing with CFG, for tighter instruction adherence; about 28 steps."
     }
@@ -248,7 +252,7 @@ func offerModel(_ tier: Tier, edit: Bool) -> JSONValue {
 
 public let kleinPlugin = GaeaPluginDefinition(
     id: "com.xocialize.gaea.flux2-klein",
-    version: "0.2.0",
+    version: "0.2.1",
     minGaea: "0.7.0",
     team: "CFZS6RXUCP",
     repo: "https://github.com/xocialize-code/gaea-plugin-flux2-klein",
