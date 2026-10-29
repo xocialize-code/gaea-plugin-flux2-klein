@@ -1,12 +1,12 @@
 # gaea-plugin-flux2-klein
 
 Black Forest Labs' **FLUX.2 [klein] 4B** (a compact rectified-flow MMDiT with Qwen3-4B conditioning, Apache-2.0) as
-a [Gaea](https://github.com/xocialize/gaea) plugin. It is built on [GaeaPluginKit](https://github.com/xocialize/gaea-plugin-kit)
+a [Gaea](https://github.com/xocialize-code/gaea) plugin. It is built on [GaeaPluginKit](https://github.com/xocialize-code/gaea-plugin-kit)
 over [flux2-klein-swift](https://github.com/xocialize/flux2-klein-swift), runs in its own process, and speaks the Gaea
 Plugin Protocol v1. Add it to Gaea by its repo URL:
 
 ```bash
-gaea plugins add https://github.com/xocialize/gaea-plugin-flux2-klein
+gaea plugins add https://github.com/xocialize-code/gaea-plugin-flux2-klein
 ```
 
 ## What it offers
@@ -58,7 +58,7 @@ scripts/check-plugin.sh
 (`CHECK_MODELS_ROOT` moves it), with every `.build` folder hidden so MLX can find its metallib only inside the
 bundle. A control then shows that the bare worker, outside the bundle, can't. `scripts/release.sh` builds, checks,
 notarizes with the fleet's `mlx-notary` profile, and publishes the GitHub release. See the
-[demo plugin](https://github.com/xocialize/gaea-plugin-demo) for signing, notarization and CI secrets.
+[demo plugin](https://github.com/xocialize-code/gaea-plugin-demo) for signing, notarization and CI secrets.
 
 `klein-inproc` (`swift run -c release klein-inproc --help` reads its header) is not part of the plugin: it runs the
 same lane in-process through MLXServeEngine, the reference that Gaea's runs are compared against byte for byte.

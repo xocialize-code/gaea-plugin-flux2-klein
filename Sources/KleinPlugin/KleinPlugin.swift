@@ -225,7 +225,7 @@ public let kleinPlugin = GaeaPluginDefinition(
     version: "0.1.0",
     minGaea: "0.2.0",
     team: "CFZS6RXUCP",
-    repo: "https://github.com/xocialize/gaea-plugin-flux2-klein",
+    repo: "https://github.com/xocialize-code/gaea-plugin-flux2-klein",
     title: "FLUX.2 Klein",
     summary: "Black Forest Labs FLUX.2 [klein] 4B (Apache-2.0): a compact rectified-flow MMDiT with Qwen3-4B conditioning. "
         + "The distilled 4-step model and the 28-step base, for generation and multi-reference editing.",
