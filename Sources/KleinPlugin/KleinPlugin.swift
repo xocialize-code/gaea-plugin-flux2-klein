@@ -15,6 +15,10 @@ import MLXToolKit
 // Each has three lanes, the DiT's quant: bf16 (the default, as in mlx-image-runtime's catalog), int8 and int4, with
 // the package's measured footprints; a Mac too small for bf16 falls back to a smaller lane (G-23). Weights come from
 // the models root Gaea sends in configure (MLXEngine's store by default); the engine materializes a missing snapshot.
+//
+// Both models take adapters (AB-T-0381) through `KleinAdapters.support`: up to 4 at 0–2, plain on generate, plain and
+// ic on edit. They ship v0.9.1's 7 FLUX.2 Klein 4B adapters, all edit adapters (ids flux2-klein:<id>, the same pinned
+// revisions and sha256s); refcontrol-pose and tryon are ic, and their images lead the edit's references in slot order.
 
 /// The output area the package's footprints were measured at, and mlx-image-runtime's envelope for Klein.
 public let maxPixels = 1024 * 1024
@@ -32,6 +36,18 @@ public enum Tier: String, Sendable {
         self == .distilled ? .turbo(quant: quant) : .base(quant: quant)
     }
 }
+
+/// The FLUX.2 Klein 4B adapters both models ship: v0.9.1's registry (`Resources/flux2-klein-4b.json`), as the engine
+/// registers them.
+public let kleinAdapters: [ShippedAdapter] = {
+    do {
+        let decoded = try AdapterRegistry.decode(Data(PackageResources.flux2_klein_4b_json))
+        precondition(decoded.skipped.isEmpty, "flux2-klein-4b.json: \(decoded.skipped)")
+        return decoded.adapters
+    } catch {
+        preconditionFailure("flux2-klein-4b.json doesn't decode: \(error)")
+    }
+}()
 
 /// The MES size a job asks for (`size`, or `aspect` with `megapixels`, Image profile §2), else `fallback`.
 func requestedSize(_ job: Job, fallback: (Int, Int)) throws -> (Int, Int) {
@@ -123,12 +139,14 @@ func generate(_ tier: Tier) -> EngineOperation {
             throw GPPError(.invalidRequest, "image.generate needs a prompt.")
         }
         let size = try snapped(try requestedSize(job, fallback: (1024, 1024)))
+        let adapters = try job.adapterRefs()
         var shared = try Shared(job, tier: tier)
         if let warning = size.warning { shared.warnings.insert(warning, at: 0) }
         let effective = shared.effective(width: size.width, height: size.height)
         return (0..<shared.count).map { i in
             EngineCall(T2IRequest(prompt: prompt, negativePrompt: shared.negative, width: size.width, height: size.height,
-                                  steps: shared.steps, guidanceScale: shared.guidance, seed: shared.seed + UInt64(i)),
+                                  steps: shared.steps, guidanceScale: shared.guidance, seed: shared.seed + UInt64(i),
+                                  adapters: adapters),
                        effective: effective, warnings: shared.warnings)
         }
     }
@@ -136,17 +154,25 @@ func generate(_ tier: Tier) -> EngineOperation {
 
 /// MES image.edit: Klein's multi-reference editing. Up to four images condition a new image drawn toward the
 /// instruction ("the subject from image 1, on a beach"); the first image sets the size (Image profile §3). One output.
+/// An ic adapter's images (refcontrol-pose's skeleton and subject) lead the references in slot order, so with one the
+/// edit may have no images of its own; its first slot's image then sets the size.
 func edit(_ tier: Tier) -> EngineOperation {
     EngineOperation("image.edit", outputNames: ["image": "image"]) { job in
         guard let instruction = try job.text("instruction"), !instruction.isEmpty else {
             throw GPPError(.invalidRequest, "image.edit needs an instruction.")
         }
         let references = job.inputs["images"] ?? []
-        guard (1...maxReferences).contains(references.count) else {
+        let leading = job.adapters.filter { $0.kind == .referenceConditioned }.flatMap { adapter in
+            let slots = kleinAdapters.first { $0.id == adapter.id }?.descriptor.conditioning.map(\.role)
+                ?? adapter.inputs.keys.sorted()
+            return slots.flatMap { adapter.inputs[$0] ?? [] }
+        }
+        guard (leading.isEmpty ? 1 : 0)...maxReferences ~= references.count else {
             throw GPPError(.invalidRequest, "image.edit takes 1–\(maxReferences) images; got \(references.count).",
                            detail: ["param": "images"])
         }
-        guard let source = CGImageSourceCreateWithURL(references[0] as CFURL, nil),
+        guard let first = (leading + references).first,
+              let source = CGImageSourceCreateWithURL(first as CFURL, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let inputWidth = properties[kCGImagePropertyPixelWidth] as? Int,
               let inputHeight = properties[kCGImagePropertyPixelHeight] as? Int else {
@@ -163,7 +189,7 @@ func edit(_ tier: Tier) -> EngineOperation {
         let images = try references.indices.map { try job.image("images", index: $0) }
         return [EngineCall(IEditRequest(images: images, prompt: instruction, negativePrompt: shared.negative,
                                         width: size.width, height: size.height, steps: shared.steps,
-                                        guidanceScale: shared.guidance, seed: shared.seed),
+                                        guidanceScale: shared.guidance, seed: shared.seed, adapters: try job.adapterRefs()),
                            effective: shared.effective(width: size.width, height: size.height, counted: false),
                            warnings: shared.warnings)]
     }
@@ -222,8 +248,8 @@ func offerModel(_ tier: Tier, edit: Bool) -> JSONValue {
 
 public let kleinPlugin = GaeaPluginDefinition(
     id: "com.xocialize.gaea.flux2-klein",
-    version: "0.1.0",
-    minGaea: "0.2.0",
+    version: "0.2.0",
+    minGaea: "0.7.0",
     team: "CFZS6RXUCP",
     repo: "https://github.com/xocialize-code/gaea-plugin-flux2-klein",
     title: "FLUX.2 Klein",
@@ -233,9 +259,9 @@ public let kleinPlugin = GaeaPluginDefinition(
     executable: "gaea-flux2-klein-worker",
     models: [
         .engine(Klein4BT2IPackage.self, id: Tier.distilled.modelID, title: "FLUX.2 Klein 4B", lanes: lanes(.distilled),
-                operations: [generate(.distilled), edit(.distilled)]),
+                operations: [generate(.distilled), edit(.distilled)]).shipping(kleinAdapters),
         .engine(Klein4BBaseT2IPackage.self, id: Tier.base.modelID, title: "FLUX.2 Klein 4B Base", lanes: lanes(.base),
-                operations: [generate(.base), edit(.base)]),
+                operations: [generate(.base), edit(.base)]).shipping(kleinAdapters),
     ],
     offers: [
         PluginManifest.Offer(operation: "image.generate", profile: "image", model: offerModel(.distilled, edit: false),

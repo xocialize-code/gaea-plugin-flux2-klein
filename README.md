@@ -22,7 +22,16 @@ gaea plugins add https://github.com/xocialize-code/gaea-plugin-flux2-klein
 - **`count`** on `image.generate`: 1–8 images, each with `seed + i`. A request without a seed gets one, reported in
   `effective`. `image.edit` has one output.
 - **Options**, as MES extensions: `x-klein.steps` (both models) and `x-klein.guidance` (base only).
-- **Not yet offered:** Klein's per-request LoRA adapters, and the package's encoder-evict light tier for 16 GB Macs.
+- **Adapters (0.2.0).** Both models take up to 4 LoRAs at strength 0–2 in the bfl-fused and diffusers-peft dialects
+  (`KleinAdapters.support`, base model `flux2-klein-4b`): plain ones on generate, plain and ic on edit. Both edit offers
+  ship the 7 FLUX.2 Klein 4B adapters pixel-agency-image-engine v0.9.1 registers, from the same registry
+  (`Sources/KleinPlugin/Resources/flux2-klein-4b.json`, verbatim from mlx-image-runtime 0.15.0 = flux2-klein-swift
+  `registry/flux2-klein-4b.json` @74d4b23): ids `flux2-klein:<id>`, the same pinned revisions and sha256s, all
+  Apache-2.0 and verified. `refcontrol-pose` (pose, reference) and `tryon` (person, top, bottom) are ic: their images
+  arrive with the adapter and lead the edit's references in slot order, so such an edit may have no images of its own
+  (the first slot's image then sets the size). The worker fetches each adapter into the models root (`adapters/<sha256>/`)
+  on first use; Gaea applies triggers and prompt templates before the run. Requires Gaea 0.7.0.
+- **Not yet offered:** the package's encoder-evict light tier for 16 GB Macs.
 
 ## Lanes and memory
 
@@ -61,7 +70,18 @@ notarizes with the fleet's `mlx-notary` profile, and publishes the GitHub releas
 [demo plugin](https://github.com/xocialize-code/gaea-plugin-demo) for signing, notarization and CI secrets.
 
 `klein-inproc` (`swift run -c release klein-inproc --help` reads its header) is not part of the plugin: it runs the
-same lane in-process through MLXServeEngine, the reference that Gaea's runs are compared against byte for byte.
+same lane in-process through MLXServeEngine, the reference that Gaea's runs are compared against byte for byte
+(`--adapter <id>=<strength>` and `--adapter-input <id>:<role>=<png>` apply shipped adapters).
+
+```bash
+scripts/golden.sh <out-dir>
+```
+
+`golden.sh` runs a seeded Klein 4B edit with one ic adapter (`flux2-klein:refcontrol-pose`, a skeleton and a subject
+from `scripts/fixtures`) and one plain one (`flux2-klein:background-remove`) over GPP on the signed bundle
+(`gaea-plugin-check --adapter`, which builds `run.adapters` from the manifest as Gaea does) and through `klein-inproc`
+with the same `AdapterRef`s, and needs them byte for byte the same. A no-adapter control must differ.
+`fixtures/pose-512.png` is a drawn OpenPose-style skeleton; `fixtures/fox-256.png` comes from gaea-plugin-forge.
 
 ## Licence
 

@@ -13,6 +13,9 @@ import MLXToolKit
 //                [--models-root <dir>] [--out <png>]
 //
 // With --image (repeatable, up to 4) it runs image edit with the prompt as the instruction.
+// --adapter <id>=<strength> (repeatable) applies a shipped adapter (flux2-klein:<id>), registered as the worker
+// registers it; --adapter-input <id>:<role>=<png> gives an ic adapter its images. With an ic adapter the edit may have
+// no --image of its own.
 
 var args = Array(CommandLine.arguments.dropFirst())
 func option(_ name: String) -> String? {
@@ -41,6 +44,18 @@ let steps = Int(option("--steps") ?? "") ?? tier.defaultSteps
 let guidance = Double(option("--guidance") ?? "") ?? tier.defaultGuidance
 let seed = UInt64(option("--seed") ?? "") ?? 42
 let imagePaths = options("--image")
+var conditioning: [String: [ConditioningInput]] = [:]
+for spec in options("--adapter-input") {
+    let (head, path) = (spec.split(separator: "=", maxSplits: 1).map(String.init)[0], String(spec.split(separator: "=", maxSplits: 1)[1]))
+    let parts = head.split(separator: ":").map(String.init)
+    let (adapter, role) = (parts.dropLast().joined(separator: ":"), parts.last!)
+    let image = Image(format: path.lowercased().hasSuffix(".png") ? .png : .jpeg, data: try Data(contentsOf: URL(fileURLWithPath: path)))
+    conditioning[adapter, default: []].append(ConditioningInput(role: role, media: .image(image)))
+}
+let adapterRefs: [AdapterRef] = options("--adapter").map { spec in
+    let parts = spec.split(separator: "=", maxSplits: 1).map(String.init)
+    return AdapterRef(id: parts[0], strength: parts.count > 1 ? Double(parts[1]) : nil, conditioning: conditioning[parts[0]] ?? [])
+}
 let outPath = option("--out")
 let modelsRoot = URL(fileURLWithPath: option("--models-root")
                      ?? NSHomeDirectory() + "/Library/Application Support/MLXEngine/Models", isDirectory: true)
@@ -54,8 +69,16 @@ await engine.useModelStore(ModelStore(root: modelsRoot))
 let id = PackageID(tier.modelID)
 let registration = tier == .distilled ? Klein4BT2IPackage.registration : Klein4BBaseT2IPackage.registration
 _ = try await engine.register(registration, configuration: tier.configuration(quant: quant), id: id)
+for ref in adapterRefs {
+    guard let shipped = kleinAdapters.first(where: { $0.id == ref.id }) else {
+        FileHandle.standardError.write(Data("no shipped adapter \(ref.id)\n".utf8))
+        exit(2)
+    }
+    try await engine.registerAdapter(shipped.descriptor)
+}
+if !adapterRefs.isEmpty { result["adapters"] = adapterRefs.map { "\($0.id)=\($0.strength.map { String($0) } ?? "default")" } }
 
-let edit = !imagePaths.isEmpty
+let edit = !imagePaths.isEmpty || !conditioning.isEmpty
 var clock = ContinuousClock.now
 _ = try await engine.prepare(edit ? .imageEdit : .textToImage, package: id)
 result["prepare_s"] = seconds(since: clock)
@@ -65,9 +88,9 @@ let images = try imagePaths.map { path in
 }
 let request: any CapabilityRequest = edit
     ? IEditRequest(images: images, prompt: prompt, negativePrompt: negative, width: width, height: height, steps: steps,
-                   guidanceScale: guidance, seed: seed)
+                   guidanceScale: guidance, seed: seed, adapters: adapterRefs)
     : T2IRequest(prompt: prompt, negativePrompt: negative, width: width, height: height, steps: steps,
-                 guidanceScale: guidance, seed: seed)
+                 guidanceScale: guidance, seed: seed, adapters: adapterRefs)
 
 for run in ["run1", "run2"] {
     clock = ContinuousClock.now
