@@ -16,13 +16,20 @@ import MLXToolKit
 // the package's measured footprints; a Mac too small for bf16 falls back to a smaller lane (G-23). Weights come from
 // the models root Gaea sends in configure (MLXEngine's store by default); the engine materializes a missing snapshot.
 //
+// Over 1024² of area (0.3.0, AB-T-0464) the DiT draws at a quarter or a sixteenth of the area and FlowUpscaler
+// (flux2-klein-swift 0.11.0, `metaData["latentUpscale"]`) doubles its latents once or twice before the row-band decode:
+// the picture the smaller draw made, with finer detail, up to 4096² (AB-R-0795, AB-R-0797). The package declares the
+// line its activation follows over output pixels, and Gaea charges each job on it.
+//
 // Both models take adapters (AB-T-0381) through `KleinAdapters.support`: up to 4 at 0–2, plain on generate, plain and
 // ic on edit. They ship v0.9.1's 7 FLUX.2 Klein 4B adapters, all edit adapters (ids flux2-klein:<id>, the same pinned
 // revisions and sha256s); refcontrol-pose and tryon are ic, and their images lead the edit's references in slot order.
 
-/// The output area the package's footprints were measured at, and mlx-image-runtime's envelope for Klein.
-public let maxPixels = 1024 * 1024
-public let minSide = 256, maxSide = 2048, grid = 16, maxReferences = 4
+/// The largest draw: the area the package's footprints were measured at, and what a latent upscale starts from.
+public let drawPixels = 1024 * 1024
+/// The largest image: 4096², two FlowUpscaler passes from a 1024² draw.
+public let maxPixels = 4096 * 4096
+public let minSide = 256, maxSide = 4096, drawMaxSide = 2048, grid = 16, maxReferences = 4
 
 public enum Tier: String, Sendable {
     case distilled, base
@@ -67,24 +74,45 @@ func requestedSize(_ job: Job, fallback: (Int, Int)) throws -> (Int, Int) {
     return fallback
 }
 
-/// Fits a size to Klein's envelope: scaled down to the area cap, keeping the aspect, then floored to multiples of 16.
-/// A change is reported as `size_snapped`.
-public func snapped(_ size: (Int, Int)) throws -> (width: Int, height: Int, warning: Warning?) {
+/// How an image size is made: the draw, and the FlowUpscaler passes (0, 1 or 2) that double it on each side.
+public struct SizePlan: Equatable, Sendable {
+    public var width: Int, height: Int
+    public var drawWidth: Int, drawHeight: Int
+    public var passes: Int
+    public var warning: Warning?
+
+    public static func == (a: SizePlan, b: SizePlan) -> Bool {
+        (a.width, a.height, a.drawWidth, a.drawHeight, a.passes) == (b.width, b.height, b.drawWidth, b.drawHeight, b.passes)
+    }
+
+    /// `latentUpscale` for the package, when there are passes.
+    public var metaData: MetaData { passes > 0 ? ["latentUpscale": .int(passes)] : [:] }
+}
+
+/// Fits a size to Klein's envelope and plans it: scaled down to 4096² of area, keeping the aspect; drawn as it is up
+/// to 1024²; past that drawn at a quarter (one pass) or a sixteenth (two) of the area and upscaled. Each side is
+/// floored to a multiple of 16 × 2^passes, so the draw is a multiple of 16. A change is reported as `size_snapped`.
+public func plan(_ size: (Int, Int)) throws -> SizePlan {
     var (w, h) = (Double(size.0), Double(size.1))
     if w * h > Double(maxPixels) {
         let scale = (Double(maxPixels) / (w * h)).squareRoot()
         w *= scale
         h *= scale
     }
-    let width = Int(w) / grid * grid, height = Int(h) / grid * grid
-    guard min(width, height) >= minSide, max(width, height) <= maxSide else {
-        throw GPPError(.invalidRequest, "FLUX.2 Klein draws \(minSide)–\(maxSide) px a side and at most 1024² in area; "
-            + "\(size.0)×\(size.1) doesn't fit.", detail: ["param": "size"])
+    let passes = w * h <= Double(drawPixels) ? 0 : w * h <= 4 * Double(drawPixels) ? 1 : 2
+    let unit = grid << passes
+    let width = Int(w) / unit * unit, height = Int(h) / unit * unit
+    let drawWidth = width >> passes, drawHeight = height >> passes
+    guard min(drawWidth, drawHeight) >= minSide, max(drawWidth, drawHeight) <= drawMaxSide else {
+        let sides = passes == 0 ? "\(minSide)–\(drawMaxSide) px a side" : "a draw of \(minSide)–\(drawMaxSide) px a side, ×\(1 << passes)"
+        throw GPPError(.invalidRequest, "FLUX.2 Klein makes \(minSide)–\(maxSide) px a side, at most 4096² in area: past 1024² it draws "
+            + "a quarter or a sixteenth of the area and upscales it. \(size.0)×\(size.1) needs \(sides), which doesn't fit.",
+            detail: ["param": "size"])
     }
+    let note = passes == 0 ? "multiples of 16, at most 1024² drawn" : "drawn at \(drawWidth)×\(drawHeight) and upscaled ×\(1 << passes), so multiples of \(unit)"
     let warning = (width, height) == size ? nil : Warning(
-        code: "size_snapped", message: "Drew \(width)×\(height) for \(size.0)×\(size.1): multiples of 16, at most 1024² in area.",
-        param: "size")
-    return (width, height, warning)
+        code: "size_snapped", message: "Made \(width)×\(height) for \(size.0)×\(size.1): \(note), at most 4096² in area.", param: "size")
+    return SizePlan(width: width, height: height, drawWidth: drawWidth, drawHeight: drawHeight, passes: passes, warning: warning)
 }
 
 /// The run's settings shared by generate and edit: steps, guidance, seed, and the warnings for what the tier ignores.
@@ -120,11 +148,15 @@ struct Shared {
         seed = job.seed ?? UInt64.random(in: 0..<(1 << 31))
     }
 
-    func effective(width: Int, height: Int, counted: Bool = true) -> [String: JSONValue] {
+    func effective(_ size: SizePlan, counted: Bool = true) -> [String: JSONValue] {
         var values: [String: JSONValue] = [
-            "size": ["width": .int(Int64(width)), "height": .int(Int64(height))],
+            "size": ["width": .int(Int64(size.width)), "height": .int(Int64(size.height))],
             "seed": .int(Int64(seed)), "x-klein.steps": .int(Int64(steps)),
         ]
+        if size.passes > 0 {
+            values["x-klein.upscaled"] = ["from": ["width": .int(Int64(size.drawWidth)), "height": .int(Int64(size.drawHeight))],
+                                          "passes": .int(Int64(size.passes)), "model": "FlowUpscaler"]
+        }
         if counted { values["count"] = .int(Int64(count)) }
         if guidance > 1 { values["x-klein.guidance"] = .double(guidance) }
         if let negative { values["negative_prompt"] = .string(negative) }
@@ -138,15 +170,15 @@ func generate(_ tier: Tier) -> EngineOperation {
         guard let prompt = try job.text("prompt"), !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw GPPError(.invalidRequest, "image.generate needs a prompt.")
         }
-        let size = try snapped(try requestedSize(job, fallback: (1024, 1024)))
+        let size = try plan(try requestedSize(job, fallback: (1024, 1024)))
         let adapters = try job.adapterRefs()
         var shared = try Shared(job, tier: tier)
         if let warning = size.warning { shared.warnings.insert(warning, at: 0) }
-        let effective = shared.effective(width: size.width, height: size.height)
+        let effective = shared.effective(size)
         return (0..<shared.count).map { i in
-            EngineCall(T2IRequest(prompt: prompt, negativePrompt: shared.negative, width: size.width, height: size.height,
+            EngineCall(T2IRequest(prompt: prompt, negativePrompt: shared.negative, width: size.drawWidth, height: size.drawHeight,
                                   steps: shared.steps, guidanceScale: shared.guidance, seed: shared.seed + UInt64(i),
-                                  adapters: adapters),
+                                  adapters: adapters, metaData: size.metaData),
                        effective: effective, warnings: shared.warnings)
         }
     }
@@ -182,7 +214,7 @@ func edit(_ tier: Tier) -> EngineOperation {
         // Without a size the package chooses (1024², whatever the inputs' aspect), as on pixel-agency-image-engine
         // v0.9.1, which sends none; the normalizer brings the result back to the first image's size (AB-T-0383).
         let asked = job.param("size") != nil || job.param("aspect") != nil
-        let size = try snapped(try requestedSize(job, fallback: (1024, 1024)))
+        let size = try plan(try requestedSize(job, fallback: (1024, 1024)))
         var shared = try Shared(job, tier: tier, counted: false)
         if let warning = size.warning { shared.warnings.insert(warning, at: 0) }
         if job.param("strength") != nil {
@@ -192,9 +224,10 @@ func edit(_ tier: Tier) -> EngineOperation {
         }
         let images = try references.indices.map { try job.image("images", index: $0) }
         return [EngineCall(IEditRequest(images: images, prompt: instruction, negativePrompt: shared.negative,
-                                        width: asked ? size.width : nil, height: asked ? size.height : nil, steps: shared.steps,
-                                        guidanceScale: shared.guidance, seed: shared.seed, adapters: try job.adapterRefs()),
-                           effective: shared.effective(width: size.width, height: size.height, counted: false),
+                                        width: asked ? size.drawWidth : nil, height: asked ? size.drawHeight : nil, steps: shared.steps,
+                                        guidanceScale: shared.guidance, seed: shared.seed, adapters: try job.adapterRefs(),
+                                        metaData: asked ? size.metaData : [:]),
+                           effective: shared.effective(size, counted: false),
                            warnings: shared.warnings)]
     }
 }
@@ -237,13 +270,16 @@ func offerModel(_ tier: Tier, edit: Bool) -> JSONValue {
     ]
     switch (tier, edit) {
     case (.distilled, false):
-        model["notes"] = "Distilled 4 steps without CFG: negative prompts do nothing. Strong prompt adherence."
+        model["notes"] = .string("Distilled 4 steps without CFG: negative prompts do nothing. Strong prompt adherence. Past 1024² it draws a "
+            + "quarter or a sixteenth of the area and upscales it (FlowUpscaler), up to 4096²: the same picture, finer.")
     case (.base, false):
-        model["notes"] = "The undistilled model: about 28 steps with CFG, honours negative prompts. Slower; tighter prompt adherence."
+        model["notes"] = .string("The undistilled model: about 28 steps with CFG, honours negative prompts. Slower; tighter prompt adherence. "
+            + "Past 1024² it draws a quarter or a sixteenth of the area and upscales it, up to 4096².")
     case (.distilled, true):
         model["default"] = true
         model["notes"] = .string("Multi-reference editing: up to 4 images, named in the instruction in order (\"the subject from image 1, on a beach\"). "
-            + "Drawn from noise at 1024² unless a size is asked, and returned at the first image's size; strength does nothing.")
+            + "Drawn from noise at 1024² unless a size is asked, and returned at the first image's size; strength does nothing. "
+            + "Past 1024² it draws a quarter or a sixteenth of the area and upscales it (FlowUpscaler), up to 4096².")
     case (.base, true):
         model["notes"] = "Multi-reference editing with CFG, for tighter instruction adherence; about 28 steps."
     }
@@ -252,8 +288,8 @@ func offerModel(_ tier: Tier, edit: Bool) -> JSONValue {
 
 public let kleinPlugin = GaeaPluginDefinition(
     id: "com.xocialize.gaea.flux2-klein",
-    version: "0.2.3",
-    minGaea: "0.7.0",
+    version: "0.3.0",
+    minGaea: "1.2.0",
     team: "CFZS6RXUCP",
     repo: "https://github.com/xocialize-code/gaea-plugin-flux2-klein",
     title: "FLUX.2 Klein",

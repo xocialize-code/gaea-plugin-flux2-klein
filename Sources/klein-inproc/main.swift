@@ -10,6 +10,9 @@ import MLXToolKit
 //
 //   klein-inproc [--model klein-4b | klein-4b-base] [--lane bf16 | int8 | int4] [--prompt <text>] [--negative <text>]
 //                [--width 1024] [--height 1024] [--steps N] [--guidance G] [--seed 42] [--image <png> ...]
+//
+// --width/--height are the image asked for, planned as the worker plans it (KleinPlugin.plan): past 1024² the draw is a
+// quarter or a sixteenth of the area, upscaled by FlowUpscaler (metaData["latentUpscale"]).
 //                [--models-root <dir>] [--out <png>]
 //
 // With --image (repeatable, up to 4) it runs image edit with the prompt as the instruction.
@@ -38,8 +41,8 @@ let tier: Tier = option("--model") == "klein-4b-base" ? .base : .distilled
 let quant = Quant(rawValue: option("--lane") ?? "bf16") ?? .bf16
 let prompt = option("--prompt") ?? "a red fox sitting in a snowy forest at sunrise, photorealistic"
 let negative = option("--negative")
-let width = Int(option("--width") ?? "") ?? 1024
-let height = Int(option("--height") ?? "") ?? 1024
+let sized = try plan((Int(option("--width") ?? "") ?? 1024, Int(option("--height") ?? "") ?? 1024))
+let (width, height) = (sized.drawWidth, sized.drawHeight)
 let steps = Int(option("--steps") ?? "") ?? tier.defaultSteps
 let guidance = Double(option("--guidance") ?? "") ?? tier.defaultGuidance
 let seed = UInt64(option("--seed") ?? "") ?? 42
@@ -60,7 +63,8 @@ let outPath = option("--out")
 let modelsRoot = URL(fileURLWithPath: option("--models-root")
                      ?? NSHomeDirectory() + "/Library/Application Support/MLXEngine/Models", isDirectory: true)
 
-var result: [String: Any] = ["model": tier.modelID, "lane": quant.rawValue, "width": width, "height": height,
+var result: [String: Any] = ["model": tier.modelID, "lane": quant.rawValue, "width": sized.width, "height": sized.height,
+                             "draw": "\(width)x\(height)", "passes": sized.passes,
                              "steps": steps, "guidance": guidance, "seed": seed, "references": imagePaths.count]
 
 // The budget Gaea sends a worker on a large Mac (wiresWeights off, the automatic pool cap).
@@ -88,9 +92,9 @@ let images = try imagePaths.map { path in
 }
 let request: any CapabilityRequest = edit
     ? IEditRequest(images: images, prompt: prompt, negativePrompt: negative, width: width, height: height, steps: steps,
-                   guidanceScale: guidance, seed: seed, adapters: adapterRefs)
+                   guidanceScale: guidance, seed: seed, adapters: adapterRefs, metaData: sized.metaData)
     : T2IRequest(prompt: prompt, negativePrompt: negative, width: width, height: height, steps: steps,
-                 guidanceScale: guidance, seed: seed, adapters: adapterRefs)
+                 guidanceScale: guidance, seed: seed, adapters: adapterRefs, metaData: sized.metaData)
 
 for run in ["run1", "run2"] {
     clock = ContinuousClock.now

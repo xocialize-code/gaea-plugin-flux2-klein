@@ -17,8 +17,18 @@ gaea plugins add https://github.com/xocialize-code/gaea-plugin-flux2-klein
 | `klein-4b` | `image.edit` (Gaea's default) | draft, standard | Multi-reference editing: 1–4 images, named in the instruction in order ("the fox from image 1 in the cabin from image 2"). Drawn from noise at 1024² unless a size is asked (as pixel-agency-image-engine v0.9.1 draws it), and returned at the first image's size; `strength` does nothing (`param_ignored`). |
 | `klein-4b-base` | `image.generate`, `image.edit` | best | The undistilled checkpoint: 28 steps with two-pass CFG at guidance 4, and negative prompts on generate. About 12× the distilled model's time. |
 
-- **Sizes.** 256–2048 px a side, at most 1024² in area (the area Klein's footprints were measured at), in multiples
-  of 16. Anything else is fitted and reported `size_snapped`. `aspect` with `megapixels` works too.
+- **Sizes (0.3.0).** 256–4096 px a side, at most 4096² in area. Up to 1024² Klein draws the image as it is.
+  - **Past 1024²,** it draws a quarter of the area (up to 2048²) or a sixteenth (up to 4096²), then
+    [FlowUpscaler](https://huggingface.co/mlx-community/FlowUpscaler-bf16) (TensorForger, Unlicense) doubles the
+    latents once or twice before the decode. The result is the picture the smaller draw made, with finer detail, and
+    effective reports it as `x-klein.upscaled` ({from, passes}).
+  - **Speed:** Klein 4B makes 2048² in about 12 s and 4096² in about 32 s, against about 7 s for 1024² (M5 Max, bf16).
+  - **Grid:** sides are multiples of 16 (32 with one pass, 64 with two). The drawn image is 256–2048 px a side.
+    Anything else is fitted and reported `size_snapped`.
+  - **Edits** are upscaled only when they ask for a size.
+  - **Memory:** the package declares how its memory grows with output pixels, and Gaea 1.2.0 charges each job on that
+    line, so 4096² (about 41 GB with bf16) is admitted only where it fits.
+  - `aspect` with `megapixels` works too.
 - **`count`** on `image.generate`: 1–8 images, each with `seed + i`. A request without a seed gets one, reported in
   `effective`. `image.edit` has one output.
 - **Options**, as MES extensions: `x-klein.steps` (both models) and `x-klein.guidance` (base only).
@@ -76,7 +86,9 @@ same lane in-process through MLXServeEngine, the reference that Gaea's runs are 
 scripts/golden.sh <out-dir>
 ```
 
-`golden.sh` runs a seeded Klein 4B edit with one ic adapter (`flux2-klein:refcontrol-pose`, a skeleton and a subject
+`golden.sh` first runs the sizes: 1024², 2048², 4096², 1536×1024, Base at 1792×1024, and an edit at 2048². Each is
+byte for byte against `klein-inproc`, which plans sizes the same way, at the asked size, with the upscale reported.
+Then it runs a seeded Klein 4B edit with one ic adapter (`flux2-klein:refcontrol-pose`, a skeleton and a subject
 from `scripts/fixtures`) and one plain one (`flux2-klein:background-remove`) over GPP on the signed bundle
 (`gaea-plugin-check --adapter`, which builds `run.adapters` from the manifest as Gaea does) and through `klein-inproc`
 with the same `AdapterRef`s, and needs them byte for byte the same. A no-adapter control must differ.
