@@ -11,6 +11,8 @@ import MLXToolKit
 // - klein-4b: distilled to 4 steps at guidance 1 (no CFG). Fast generation, and Gaea's default image.edit:
 //   multi-reference editing from up to four images is what this model is for.
 // - klein-4b-base: the undistilled checkpoint, ~28 steps with two-pass CFG and negative prompts. The `best` tier.
+// - klein-4b-rdm (0.4.0): EPFL VITA's one-step RDM fine-tune of Klein 4B's DiT on the same encoder and VAE, generate
+//   only. 0.43× the 4-step model's time at 1024² at the same TierBench quality (AB-R-1056): the `draft` tier.
 //
 // Each has three lanes, the DiT's quant: bf16 (the default, as in mlx-image-runtime's catalog), int8 and int4, with
 // the package's measured footprints; a Mac too small for bf16 falls back to a smaller lane (G-23). Weights come from
@@ -31,16 +33,41 @@ public let drawPixels = 1024 * 1024
 public let maxPixels = 4096 * 4096
 public let minSide = 256, maxSide = 4096, drawMaxSide = 2048, grid = 16, maxReferences = 4
 
-public enum Tier: String, Sendable {
-    case distilled, base
+/// FLUX.2 Klein 1-step RDM (epfl-vita/flux2-klein-1step-rdm, Apache-2.0): Klein 4B's DiT fine-tuned for one step by
+/// Representation Distribution Matching, on Klein's own encoder and VAE. Its weights are BFL-layout; this repo holds the
+/// diffusers-layout snapshot (jeveration-oracle `make_rdm_snapshot.py`, AB-R-1054).
+public let rdmRepo = "mlx-community/FLUX.2-klein-4B-1step-RDM-bf16"
+/// The published revision, pinned: its DiT is byte for byte the one TierBench measured (sha256 297718962320…).
+public let rdmRevision = "2037b5c8da31053d2c3fb9a9520681d95c28080d"
 
-    public var modelID: String { self == .distilled ? "klein-4b" : "klein-4b-base" }
-    public var defaultSteps: Int { self == .distilled ? 4 : 28 }
-    public var defaultGuidance: Double { self == .distilled ? 1 : 4 }
+public enum Tier: String, Sendable {
+    case distilled, base, rdm
+
+    public var modelID: String {
+        switch self {
+        case .distilled: "klein-4b"
+        case .base: "klein-4b-base"
+        case .rdm: "klein-4b-rdm"
+        }
+    }
+    public var defaultSteps: Int {
+        switch self {
+        case .distilled: 4
+        case .base: 28
+        case .rdm: 1
+        }
+    }
+    /// Only the base model runs two-pass CFG; the distilled models run at guidance 1.
+    public var usesCFG: Bool { self == .base }
+    public var defaultGuidance: Double { usesCFG ? 4 : 1 }
 
     /// The package configuration for one lane; klein-inproc builds the same one.
     public func configuration(quant: Quant) -> KleinConfiguration {
-        self == .distilled ? .turbo(quant: quant) : .base(quant: quant)
+        switch self {
+        case .distilled: .turbo(quant: quant)
+        case .base: .base(quant: quant)
+        case .rdm: KleinConfiguration(repo: rdmRepo, revision: rdmRevision, quant: quant, defaultSteps: 1, guidanceScale: 1.0)
+        }
     }
 }
 
@@ -128,18 +155,18 @@ struct Shared {
     init(_ job: Job, tier: Tier, counted: Bool = true) throws {
         steps = job.param("x-klein.steps")?.intValue ?? tier.defaultSteps
         guard (1...100).contains(steps) else { throw GPPError(.invalidRequest, "x-klein.steps is 1–100.") }
-        guidance = tier == .distilled ? 1 : job.param("x-klein.guidance")?.doubleValue ?? tier.defaultGuidance
+        guidance = !tier.usesCFG ? 1 : job.param("x-klein.guidance")?.doubleValue ?? tier.defaultGuidance
         guard (1...20).contains(guidance) else { throw GPPError(.invalidRequest, "x-klein.guidance is 1–20.") }
         count = counted ? job.param("count")?.intValue ?? 1 : 1
         guard (1...8).contains(count) else { throw GPPError(.invalidRequest, "count is 1–8.") }
         let negative = job.param("negative_prompt")?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
-        if tier == .distilled, negative != nil {
+        if !tier.usesCFG, negative != nil {
             warnings.append(Warning(code: "negative_prompt_ignored",
-                                    message: "FLUX.2 Klein 4B is distilled to run without CFG, so a negative prompt does nothing; "
+                                    message: "This FLUX.2 Klein 4B model is distilled to run without CFG, so a negative prompt does nothing; "
                                         + "Klein 4B Base (best) honours it.",
                                     param: "negative_prompt"))
         }
-        self.negative = tier == .distilled ? nil : negative
+        self.negative = tier.usesCFG ? negative : nil
         if job.param("prompt_enhance")?.stringValue == "on" {
             warnings.append(Warning(code: "prompt_enhance_ignored", message: "This plugin doesn't rewrite prompts; Gaea's enhancer does.",
                                     param: "prompt_enhance"))
@@ -244,9 +271,14 @@ let editLimits = PluginManifest.Limits(maxPixels: maxPixels, minSide: minSide, m
                                        maxImages: maxReferences)
 
 func stepsParam(_ tier: Tier) -> JSONValue {
-    ["type": "integer", "minimum": 1, "maximum": 100, "default": .int(Int64(tier.defaultSteps)),
-     "description": .string(tier == .distilled ? "Denoising steps. Klein 4B is distilled for 4." : "Denoising steps; more is slower and finer."),
-     "x-mes-ui": ["widget": "slider", "label": "Steps", "advanced": true]]
+    let description = switch tier {
+    case .distilled: "Denoising steps. Klein 4B is distilled for 4."
+    case .rdm: "Denoising steps. This model is trained for 1."
+    case .base: "Denoising steps; more is slower and finer."
+    }
+    return ["type": "integer", "minimum": 1, "maximum": 100, "default": .int(Int64(tier.defaultSteps)),
+            "description": .string(description),
+            "x-mes-ui": ["widget": "slider", "label": "Steps", "advanced": true]]
 }
 
 let guidanceParam: JSONValue = [
@@ -257,18 +289,22 @@ let guidanceParam: JSONValue = [
 
 func params(_ tier: Tier) -> JSONValue {
     var properties: [String: JSONValue] = ["x-klein.steps": stepsParam(tier)]
-    if tier == .base { properties["x-klein.guidance"] = guidanceParam }
+    if tier.usesCFG { properties["x-klein.guidance"] = guidanceParam }
     return ["type": "object", "properties": .object(properties), "additionalProperties": false]
 }
 
 func offerModel(_ tier: Tier, edit: Bool) -> JSONValue {
-    let distilled = tier == .distilled
+    let titles: [Tier: String] = [.distilled: "FLUX.2 Klein 4B", .base: "FLUX.2 Klein 4B Base", .rdm: "FLUX.2 Klein 4B 1-step (RDM)"]
+    let qualityTiers: [Tier: JSONValue] = [.distilled: ["draft", "standard"], .base: ["best"], .rdm: ["draft"]]
     var model: [String: JSONValue] = [
-        "id": .string(tier.modelID), "title": .string(distilled ? "FLUX.2 Klein 4B" : "FLUX.2 Klein 4B Base"), "license": apache,
-        "memory_class": "large", "speed_class": .string(distilled ? "fast" : "slow"),
-        "quality_tiers": distilled ? ["draft", "standard"] : ["best"],
+        "id": .string(tier.modelID), "title": .string(titles[tier]!), "license": apache,
+        "memory_class": "large", "speed_class": .string(tier == .base ? "slow" : "fast"),
+        "quality_tiers": qualityTiers[tier]!,
     ]
     switch (tier, edit) {
+    case (.rdm, _):
+        model["notes"] = .string("Klein 4B's DiT distilled to one step (RDM, EPFL VITA, Apache-2.0) on Klein's encoder and VAE: about 2.5× "
+            + "faster than the 4-step model at 512². Trained at 512²; negative prompts do nothing. Text to image only.")
     case (.distilled, false):
         model["notes"] = .string("Distilled 4 steps without CFG: negative prompts do nothing. Strong prompt adherence. Past 1024² it draws a "
             + "quarter or a sixteenth of the area and upscales it (FlowUpscaler), up to 4096²: the same picture, finer.")
@@ -288,7 +324,7 @@ func offerModel(_ tier: Tier, edit: Bool) -> JSONValue {
 
 public let kleinPlugin = GaeaPluginDefinition(
     id: "com.xocialize.gaea.flux2-klein",
-    version: "0.3.1",
+    version: "0.4.0",
     minGaea: "1.2.0",
     team: "CFZS6RXUCP",
     repo: "https://github.com/xocialize-code/gaea-plugin-flux2-klein",
@@ -302,12 +338,16 @@ public let kleinPlugin = GaeaPluginDefinition(
                 operations: [generate(.distilled), edit(.distilled)]).shipping(kleinAdapters),
         .engine(Klein4BBaseT2IPackage.self, id: Tier.base.modelID, title: "FLUX.2 Klein 4B Base", lanes: lanes(.base),
                 operations: [generate(.base), edit(.base)]).shipping(kleinAdapters),
+        .engine(Klein4BT2IPackage.self, id: Tier.rdm.modelID, title: "FLUX.2 Klein 4B 1-step (RDM)", lanes: lanes(.rdm),
+                operations: [generate(.rdm)]),
     ],
     offers: [
         PluginManifest.Offer(operation: "image.generate", profile: "image", model: offerModel(.distilled, edit: false),
                              params: params(.distilled), defaults: ["count": 1], limits: limits),
         PluginManifest.Offer(operation: "image.generate", profile: "image", model: offerModel(.base, edit: false),
                              params: params(.base), defaults: ["count": 1], limits: limits),
+        PluginManifest.Offer(operation: "image.generate", profile: "image", model: offerModel(.rdm, edit: false),
+                             params: params(.rdm), defaults: ["count": 1], limits: limits),
         PluginManifest.Offer(operation: "image.edit", profile: "image", model: offerModel(.distilled, edit: true),
                              params: params(.distilled), limits: editLimits),
         PluginManifest.Offer(operation: "image.edit", profile: "image", model: offerModel(.base, edit: true),

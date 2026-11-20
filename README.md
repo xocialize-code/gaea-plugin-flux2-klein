@@ -16,6 +16,7 @@ gaea plugins add https://github.com/xocialize-code/gaea-plugin-flux2-klein
 | `klein-4b` | `image.generate` | draft, standard | Distilled to 4 steps without CFG. A negative prompt does nothing and is reported `negative_prompt_ignored`. |
 | `klein-4b` | `image.edit` (Gaea's default) | draft, standard | Multi-reference editing: 1–4 images, named in the instruction in order ("the fox from image 1 in the cabin from image 2"). Drawn from noise at 1024² unless a size is asked (as pixel-agency-image-engine v0.9.1 draws it), and returned at the first image's size; `strength` does nothing (`param_ignored`). |
 | `klein-4b-base` | `image.generate`, `image.edit` | best | The undistilled checkpoint: 28 steps with two-pass CFG at guidance 4, and negative prompts on generate. About 12× the distilled model's time. |
+| `klein-4b-rdm` (0.4.0) | `image.generate` | draft | Klein 4B's DiT distilled to **one step** by EPFL VITA ([flux2-klein-1step-rdm](https://huggingface.co/epfl-vita/flux2-klein-1step-rdm), Apache-2.0), on Klein's own encoder and VAE. 0.43× the 4-step model's time at 1024² (2.8 s against 6.5 s on an M5 Max) at the same SigLIP2 quality and keyword recall in TierBench (AB-R-1056); spells in-image text a little less reliably. Trained at 512². No negative prompts, no adapters, no edit. |
 
 - **Sizes (0.3.0).** 256–4096 px a side, at most 4096² in area. Up to 1024² Klein draws the image as it is.
   - **Past 1024²,** it draws a quarter of the area (up to 2048²) or a sixteenth (up to 4096²), then
@@ -59,8 +60,9 @@ bf16 is the default, as in mlx-image-runtime's catalog. When it doesn't fit, Gae
 ## Weights
 
 Gaea sends its models root in `configure` (MLXEngine's store by default, `gaea models root` to change it). The
-worker looks for `mlx-community/FLUX.2-klein-4B-bf16` and `mlx-community/FLUX.2-klein-base-4B-bf16` there and
-downloads a missing snapshot on `prepare` or `materialize`. The int8 and int4 lanes quantize the bf16 DiT on load.
+worker looks for `mlx-community/FLUX.2-klein-4B-bf16`, `mlx-community/FLUX.2-klein-base-4B-bf16` and
+`mlx-community/FLUX.2-klein-4B-1step-RDM-bf16` (RDM's DiT in diffusers' layout beside Klein 4B's encoder and VAE) there
+and downloads a missing snapshot on `prepare` or `materialize`. The int8 and int4 lanes quantize the bf16 DiT on load.
 
 ## Build and check locally
 
@@ -96,5 +98,6 @@ with the same `AdapterRef`s, and needs them byte for byte the same. A no-adapter
 
 ## Licence
 
-The plugin is Apache-2.0 (Gaea G-21). FLUX.2 [klein] 4B and its base are Apache-2.0 (Black Forest Labs), and
+The plugin is Apache-2.0 (Gaea G-21). FLUX.2 [klein] 4B and its base are Apache-2.0 (Black Forest Labs), the 1-step
+RDM DiT is Apache-2.0 (EPFL VITA, a fine-tune of Klein 4B), and
 flux2-klein-swift is MIT. The 9B Klein variants are under FLUX's non-commercial licence and are not in this plugin.

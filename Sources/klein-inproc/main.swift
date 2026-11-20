@@ -37,7 +37,8 @@ func seconds(since start: ContinuousClock.Instant) -> Double {
 }
 
 let started = ContinuousClock.now
-let tier: Tier = option("--model") == "klein-4b-base" ? .base : .distilled
+let modelOption = option("--model")   // option() consumes the flag: read it once
+let tier: Tier = [Tier.base, .rdm].first { $0.modelID == modelOption } ?? .distilled
 let quant = Quant(rawValue: option("--lane") ?? "bf16") ?? .bf16
 let prompt = option("--prompt") ?? "a red fox sitting in a snowy forest at sunrise, photorealistic"
 let negative = option("--negative")
@@ -71,7 +72,7 @@ var result: [String: Any] = ["model": tier.modelID, "lane": quant.rawValue, "wid
 let engine = MLXServeEngine(workerBudget: WorkerBudget(ceilingBytes: 64_000_000_000, wiresWeights: false))
 await engine.useModelStore(ModelStore(root: modelsRoot))
 let id = PackageID(tier.modelID)
-let registration = tier == .distilled ? Klein4BT2IPackage.registration : Klein4BBaseT2IPackage.registration
+let registration = tier == .base ? Klein4BBaseT2IPackage.registration : Klein4BT2IPackage.registration
 _ = try await engine.register(registration, configuration: tier.configuration(quant: quant), id: id)
 for ref in adapterRefs {
     guard let shipped = kleinAdapters.first(where: { $0.id == ref.id }) else {
