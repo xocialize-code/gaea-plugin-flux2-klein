@@ -288,7 +288,7 @@ func offerModel(_ tier: Tier, edit: Bool) -> JSONValue {
 
 public let kleinPlugin = GaeaPluginDefinition(
     id: "com.xocialize.gaea.flux2-klein",
-    version: "0.3.0",
+    version: "0.3.1",
     minGaea: "1.2.0",
     team: "CFZS6RXUCP",
     repo: "https://github.com/xocialize-code/gaea-plugin-flux2-klein",
