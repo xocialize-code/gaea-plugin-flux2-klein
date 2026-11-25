@@ -17,7 +17,8 @@ let package = Package(
     dependencies: [
         kitPath.map { .package(path: $0) }
             ?? .package(url: "https://github.com/xocialize-code/gaea-plugin-kit.git", from: "0.14.1"),
-        .package(url: "https://github.com/xocialize/flux2-klein-swift.git", exact: "0.11.0"),
+        // 0.12.0: KleinBonsaiT2IPackage, and (0.11.1) the row-band VAE decode at every size.
+        .package(url: "https://github.com/xocialize/flux2-klein-swift.git", exact: "0.12.0"),
         // mlx-engine-swift 0.82.1, the first on the fleet's mlx-swift 0.33.1.
         .package(url: "https://github.com/xocialize/mlx-engine-swift.git", from: "0.82.1"),
         // The fleet's mlx-swift fork, as mlx-engine-swift 0.82.1 takes it: 0.33.1 is upstream 0.33.0 with the

@@ -1,5 +1,5 @@
 {
-  "originHash" : "443f2e818d77143ca12ea8005cae94aac76d7373523d4a4e519bf8507787b94a",
+  "originHash" : "ce8cd2be69c00140120c66967b1503bad0f1877cc3e06cf87a2fa662eb06b7a4",
   "pins" : [
     {
       "identity" : "designscaffold",
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/xocialize/flux2-klein-swift.git",
       "state" : {
-        "revision" : "a7334fcd79119731b4ad47ef906bc6f8fd94327a",
-        "version" : "0.11.0"
+        "revision" : "6bad92b872968728de024c4f5d8c08ec7bc11cc6",
+        "version" : "0.12.0"
       }
     },
     {

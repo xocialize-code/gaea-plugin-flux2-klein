@@ -13,8 +13,12 @@ import MLXToolKit
 // - klein-4b-base: the undistilled checkpoint, ~28 steps with two-pass CFG and negative prompts. The `best` tier.
 // - klein-4b-rdm (0.4.0): EPFL VITA's one-step RDM fine-tune of Klein 4B's DiT on the same encoder and VAE, generate
 //   only. 0.43× the 4-step model's time at 1024² at the same TierBench quality (AB-R-1056): the `draft` tier.
+// - klein-4b-bonsai (0.5.0): Prism ML's Bonsai Image Ternary 4B (Apache-2.0), Klein 4B with the DiT retrained to
+//   ternary weights, on `KleinBonsaiT2IPackage` (flux2-klein-swift 0.12.0). A 3.9 GB download and about 8 GB of
+//   memory at 1024². Generate only, no adapters, one lane, and named-only: it draws a different picture from Klein 4B
+//   and follows prompts worse at 512² (AB-R-1130, AB-R-1138), so nothing picks it by default.
 //
-// Each has three lanes, the DiT's quant: bf16 (the default, as in mlx-image-runtime's catalog), int8 and int4, with
+// Each Klein model has three lanes, the DiT's quant: bf16 (the default, as in mlx-image-runtime's catalog), int8 and int4, with
 // the package's measured footprints; a Mac too small for bf16 falls back to a smaller lane (G-23). Weights come from
 // the models root Gaea sends in configure (MLXEngine's store by default); the engine materializes a missing snapshot.
 //
@@ -40,19 +44,23 @@ public let rdmRepo = "mlx-community/FLUX.2-klein-4B-1step-RDM-bf16"
 /// The published revision, pinned: its DiT is byte for byte the one TierBench measured (sha256 297718962320…).
 public let rdmRevision = "2037b5c8da31053d2c3fb9a9520681d95c28080d"
 
+/// Bonsai Image Ternary 4B's one lane. The DiT is 2-bit packed ternary; MLXEngine's `Quant` has no case for it.
+public let bonsaiLane = "ternary"
+
 public enum Tier: String, Sendable {
-    case distilled, base, rdm
+    case distilled, base, rdm, bonsai
 
     public var modelID: String {
         switch self {
         case .distilled: "klein-4b"
         case .base: "klein-4b-base"
         case .rdm: "klein-4b-rdm"
+        case .bonsai: "klein-4b-bonsai"
         }
     }
     public var defaultSteps: Int {
         switch self {
-        case .distilled: 4
+        case .distilled, .bonsai: 4
         case .base: 28
         case .rdm: 1
         }
@@ -61,12 +69,22 @@ public enum Tier: String, Sendable {
     public var usesCFG: Bool { self == .base }
     public var defaultGuidance: Double { usesCFG ? 4 : 1 }
 
-    /// The package configuration for one lane; klein-inproc builds the same one.
-    public func configuration(quant: Quant) -> KleinConfiguration {
+    /// The package configuration for one lane; klein-inproc builds the same one. Bonsai has one lane, whatever `quant`.
+    public func configuration(quant: Quant) -> any PackageConfiguration {
         switch self {
-        case .distilled: .turbo(quant: quant)
-        case .base: .base(quant: quant)
+        case .distilled: KleinConfiguration.turbo(quant: quant)
+        case .base: KleinConfiguration.base(quant: quant)
         case .rdm: KleinConfiguration(repo: rdmRepo, revision: rdmRevision, quant: quant, defaultSteps: 1, guidanceScale: 1.0)
+        case .bonsai: KleinBonsaiConfiguration()   // Prism ML's repo, pinned at the measured revision
+        }
+    }
+
+    /// The package behind the model.
+    public var registration: PackageRegistration {
+        switch self {
+        case .distilled, .rdm: Klein4BT2IPackage.registration
+        case .base: Klein4BBaseT2IPackage.registration
+        case .bonsai: KleinBonsaiT2IPackage.registration
         }
     }
 }
@@ -260,7 +278,10 @@ func edit(_ tier: Tier) -> EngineOperation {
 }
 
 public func lanes(_ tier: Tier) -> [LaneDefinition] {
-    [Quant.bf16, .int8, .int4].map { quant in
+    if tier == .bonsai {
+        return [LaneDefinition(id: bonsaiLane, default: true, configuration: tier.configuration(quant: .int4))]
+    }
+    return [Quant.bf16, .int8, .int4].map { quant in
         LaneDefinition(id: quant.rawValue, default: quant == .bf16, configuration: tier.configuration(quant: quant))
     }
 }
@@ -274,6 +295,7 @@ func stepsParam(_ tier: Tier) -> JSONValue {
     let description = switch tier {
     case .distilled: "Denoising steps. Klein 4B is distilled for 4."
     case .rdm: "Denoising steps. This model is trained for 1."
+    case .bonsai: "Denoising steps. This model is made for 4; more adds little and can add artifacts."
     case .base: "Denoising steps; more is slower and finer."
     }
     return ["type": "integer", "minimum": 1, "maximum": 100, "default": .int(Int64(tier.defaultSteps)),
@@ -294,14 +316,22 @@ func params(_ tier: Tier) -> JSONValue {
 }
 
 func offerModel(_ tier: Tier, edit: Bool) -> JSONValue {
-    let titles: [Tier: String] = [.distilled: "FLUX.2 Klein 4B", .base: "FLUX.2 Klein 4B Base", .rdm: "FLUX.2 Klein 4B 1-step (RDM)"]
-    let qualityTiers: [Tier: JSONValue] = [.distilled: ["draft", "standard"], .base: ["best"], .rdm: ["draft"]]
+    let titles: [Tier: String] = [.distilled: "FLUX.2 Klein 4B", .base: "FLUX.2 Klein 4B Base", .rdm: "FLUX.2 Klein 4B 1-step (RDM)",
+                                  .bonsai: bonsaiTitle]
+    let qualityTiers: [Tier: JSONValue] = [.distilled: ["draft", "standard"], .base: ["best"], .rdm: ["draft"], .bonsai: ["draft"]]
     var model: [String: JSONValue] = [
         "id": .string(tier.modelID), "title": .string(titles[tier]!), "license": apache,
-        "memory_class": "large", "speed_class": .string(tier == .base ? "slow" : "fast"),
+        "memory_class": tier == .bonsai ? "medium" : "large", "speed_class": .string(tier == .base ? "slow" : "fast"),
         "quality_tiers": qualityTiers[tier]!,
     ]
     switch (tier, edit) {
+    case (.bonsai, _):
+        // Named-only: a redraw of Klein 4B that follows prompts worse at 512², so no tier picks it by itself.
+        model["named_only"] = true
+        model["notes"] = .string("Created using Bonsai Image by Prism ML (Apache-2.0): FLUX.2 Klein 4B with the transformer retrained to "
+            + "ternary weights. A 3.9 GB download and about 8 GB of memory at 1024², against 26 GB for Klein 4B. Best at 1024²-class "
+            + "sizes: it follows prompts about as well as Klein 4B's int4 lane there, and worse at 512². It draws a different picture "
+            + "from Klein 4B at the same seed. 4 steps, no CFG: negative prompts do nothing. Text to image only, no adapters.")
     case (.rdm, _):
         model["notes"] = .string("Klein 4B's DiT distilled to one step (RDM, EPFL VITA, Apache-2.0) on Klein's encoder and VAE: about 2.5× "
             + "faster than the 4-step model at 512². Trained at 512²; negative prompts do nothing. Text to image only.")
@@ -322,9 +352,11 @@ func offerModel(_ tier: Tier, edit: Bool) -> JSONValue {
     return .object(model)
 }
 
+let bonsaiTitle = "Bonsai Image Ternary 4B (Klein 4B)"
+
 public let kleinPlugin = GaeaPluginDefinition(
     id: "com.xocialize.gaea.flux2-klein",
-    version: "0.4.0",
+    version: "0.5.0",
     minGaea: "1.2.0",
     team: "CFZS6RXUCP",
     repo: "https://github.com/xocialize-code/gaea-plugin-flux2-klein",
@@ -340,6 +372,8 @@ public let kleinPlugin = GaeaPluginDefinition(
                 operations: [generate(.base), edit(.base)]).shipping(kleinAdapters),
         .engine(Klein4BT2IPackage.self, id: Tier.rdm.modelID, title: "FLUX.2 Klein 4B 1-step (RDM)", lanes: lanes(.rdm),
                 operations: [generate(.rdm)]),
+        .engine(KleinBonsaiT2IPackage.self, id: Tier.bonsai.modelID, title: bonsaiTitle, lanes: lanes(.bonsai),
+                operations: [generate(.bonsai)]),
     ],
     offers: [
         PluginManifest.Offer(operation: "image.generate", profile: "image", model: offerModel(.distilled, edit: false),
@@ -348,6 +382,8 @@ public let kleinPlugin = GaeaPluginDefinition(
                              params: params(.base), defaults: ["count": 1], limits: limits),
         PluginManifest.Offer(operation: "image.generate", profile: "image", model: offerModel(.rdm, edit: false),
                              params: params(.rdm), defaults: ["count": 1], limits: limits),
+        PluginManifest.Offer(operation: "image.generate", profile: "image", model: offerModel(.bonsai, edit: false),
+                             params: params(.bonsai), defaults: ["count": 1], limits: limits),
         PluginManifest.Offer(operation: "image.edit", profile: "image", model: offerModel(.distilled, edit: true),
                              params: params(.distilled), limits: editLimits),
         PluginManifest.Offer(operation: "image.edit", profile: "image", model: offerModel(.base, edit: true),

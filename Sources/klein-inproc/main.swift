@@ -8,7 +8,7 @@ import MLXToolKit
 // configuration the worker uses (KleinPlugin) and the request it would build. A cold run then a warm one; the first
 // image is written to --out, and one JSON line of timings is printed. Not part of the plugin bundle.
 //
-//   klein-inproc [--model klein-4b | klein-4b-base] [--lane bf16 | int8 | int4] [--prompt <text>] [--negative <text>]
+//   klein-inproc [--model klein-4b | klein-4b-base | klein-4b-rdm | klein-4b-bonsai] [--lane bf16 | int8 | int4] [--prompt <text>] [--negative <text>]
 //                [--width 1024] [--height 1024] [--steps N] [--guidance G] [--seed 42] [--image <png> ...]
 //
 // --width/--height are the image asked for, planned as the worker plans it (KleinPlugin.plan): past 1024² the draw is a
@@ -38,7 +38,7 @@ func seconds(since start: ContinuousClock.Instant) -> Double {
 
 let started = ContinuousClock.now
 let modelOption = option("--model")   // option() consumes the flag: read it once
-let tier: Tier = [Tier.base, .rdm].first { $0.modelID == modelOption } ?? .distilled
+let tier: Tier = [Tier.base, .rdm, .bonsai].first { $0.modelID == modelOption } ?? .distilled
 let quant = Quant(rawValue: option("--lane") ?? "bf16") ?? .bf16
 let prompt = option("--prompt") ?? "a red fox sitting in a snowy forest at sunrise, photorealistic"
 let negative = option("--negative")
@@ -64,7 +64,7 @@ let outPath = option("--out")
 let modelsRoot = URL(fileURLWithPath: option("--models-root")
                      ?? NSHomeDirectory() + "/Library/Application Support/MLXEngine/Models", isDirectory: true)
 
-var result: [String: Any] = ["model": tier.modelID, "lane": quant.rawValue, "width": sized.width, "height": sized.height,
+var result: [String: Any] = ["model": tier.modelID, "lane": tier == .bonsai ? bonsaiLane : quant.rawValue, "width": sized.width, "height": sized.height,
                              "draw": "\(width)x\(height)", "passes": sized.passes,
                              "steps": steps, "guidance": guidance, "seed": seed, "references": imagePaths.count]
 
@@ -72,8 +72,7 @@ var result: [String: Any] = ["model": tier.modelID, "lane": quant.rawValue, "wid
 let engine = MLXServeEngine(workerBudget: WorkerBudget(ceilingBytes: 64_000_000_000, wiresWeights: false))
 await engine.useModelStore(ModelStore(root: modelsRoot))
 let id = PackageID(tier.modelID)
-let registration = tier == .base ? Klein4BBaseT2IPackage.registration : Klein4BT2IPackage.registration
-_ = try await engine.register(registration, configuration: tier.configuration(quant: quant), id: id)
+_ = try await engine.register(tier.registration, configuration: tier.configuration(quant: quant), id: id)
 for ref in adapterRefs {
     guard let shipped = kleinAdapters.first(where: { $0.id == ref.id }) else {
         FileHandle.standardError.write(Data("no shipped adapter \(ref.id)\n".utf8))

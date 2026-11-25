@@ -17,6 +17,7 @@ gaea plugins add https://github.com/xocialize-code/gaea-plugin-flux2-klein
 | `klein-4b` | `image.edit` (Gaea's default) | draft, standard | Multi-reference editing: 1–4 images, named in the instruction in order ("the fox from image 1 in the cabin from image 2"). Drawn from noise at 1024² unless a size is asked (as pixel-agency-image-engine v0.9.1 draws it), and returned at the first image's size; `strength` does nothing (`param_ignored`). |
 | `klein-4b-base` | `image.generate`, `image.edit` | best | The undistilled checkpoint: 28 steps with two-pass CFG at guidance 4, and negative prompts on generate. About 12× the distilled model's time. |
 | `klein-4b-rdm` (0.4.0) | `image.generate` | draft | Klein 4B's DiT distilled to **one step** by EPFL VITA ([flux2-klein-1step-rdm](https://huggingface.co/epfl-vita/flux2-klein-1step-rdm), Apache-2.0), on Klein's own encoder and VAE. 0.43× the 4-step model's time at 1024² (2.8 s against 6.5 s on an M5 Max) at the same SigLIP2 quality and keyword recall in TierBench (AB-R-1056); spells in-image text a little less reliably. Trained at 512². No negative prompts, no adapters, no edit. |
+| `klein-4b-bonsai` (0.5.0) | `image.generate` (named-only) | draft | Prism ML's [Bonsai Image Ternary 4B](https://huggingface.co/prism-ml/bonsai-image-ternary-4B-mlx-2bit) (Apache-2.0): Klein 4B with the transformer retrained to **ternary weights**. A 3.9 GB download and about 8 GB of memory at 1024², against 26 GB for `klein-4b`. Best at 1024²-class sizes: 10 of 12 test prompts usable there (Klein 4B int4 10, bf16 11), 8 of 12 at 512² (AB-R-1130). It draws a different picture from `klein-4b` at the same seed. Nothing picks it by default: a request names it. No negative prompts, no adapters, no edit. |
 
 - **Sizes (0.3.0).** 256–4096 px a side, at most 4096² in area. Up to 1024² Klein draws the image as it is.
   - **Past 1024²,** it draws a quarter of the area (up to 2048²) or a sixteenth (up to 4096²), then
@@ -45,7 +46,7 @@ gaea plugins add https://github.com/xocialize-code/gaea-plugin-flux2-klein
 
 ## Lanes and memory
 
-Each model has three lanes, one per DiT quant, with the package's footprints measured at 1024²:
+Each Klein model has three lanes, one per DiT quant, with the package's declared footprints at 1024²:
 
 | Lane | Resident | Peak while running (distilled / base) | Gaea schedules (distilled / base) |
 |---|---|---|---|
@@ -57,12 +58,22 @@ bf16 is the default, as in mlx-image-runtime's catalog. When it doesn't fit, Gae
 (`lane_fallback`, G-23); `gaea models lane klein-4b int4` makes another lane the default. A request naming a lane
 (`x-gaea.lane`) never falls back.
 
+`klein-4b-bonsai` has one lane, `ternary`: 3.6 GB resident and 4.4 GB while running, so Gaea schedules 8.0 GB at up to
+1024² (12.6 GB at 2048², 31.1 GB at 4096²). Through the signed bundle the worker peaked at 7.9 GB at 1024² and
+12.0 GB at 2048² (M5 Max, AB-R-1138 and this release's check).
+
+Since 0.5.0 the Klein models decode in row bands at every size (flux2-klein-swift 0.11.1), which takes about 8 GB off
+their real peak at 1024². Their declared footprints above are unchanged, so Gaea reserves more than they now use.
+An image differs from 0.4.0's at the same seed by at most 5 of 255 levels.
+
 ## Weights
 
 Gaea sends its models root in `configure` (MLXEngine's store by default, `gaea models root` to change it). The
 worker looks for `mlx-community/FLUX.2-klein-4B-bf16`, `mlx-community/FLUX.2-klein-base-4B-bf16` and
 `mlx-community/FLUX.2-klein-4B-1step-RDM-bf16` (RDM's DiT in diffusers' layout beside Klein 4B's encoder and VAE) there
 and downloads a missing snapshot on `prepare` or `materialize`. The int8 and int4 lanes quantize the bf16 DiT on load.
+`klein-4b-bonsai` reads `prism-ml/bonsai-image-ternary-4B-mlx-2bit` as Prism ML publishes it (a 2-bit DiT and a 4-bit
+Qwen3-4B, already packed), pinned at revision `2c24c81b`.
 
 ## Build and check locally
 
@@ -99,5 +110,6 @@ with the same `AdapterRef`s, and needs them byte for byte the same. A no-adapter
 ## Licence
 
 The plugin is Apache-2.0 (Gaea G-21). FLUX.2 [klein] 4B and its base are Apache-2.0 (Black Forest Labs), the 1-step
-RDM DiT is Apache-2.0 (EPFL VITA, a fine-tune of Klein 4B), and
-flux2-klein-swift is MIT. The 9B Klein variants are under FLUX's non-commercial licence and are not in this plugin.
+RDM DiT is Apache-2.0 (EPFL VITA, a fine-tune of Klein 4B), Bonsai Image Ternary 4B is Apache-2.0 (Prism ML, built from
+Klein 4B and Qwen3-4B; Prism ML asks for the credit "Created using Bonsai Image by Prism ML", which the model's notes
+carry), and flux2-klein-swift is MIT. The 9B Klein variants are under FLUX's non-commercial licence and are not in this plugin.
